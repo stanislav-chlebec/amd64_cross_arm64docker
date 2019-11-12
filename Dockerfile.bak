@@ -1,0 +1,194 @@
+ARG BASE_IMG
+
+FROM ${BASE_IMG} as dev-stage
+
+
+
+DEB_DEPENDS  = curl build-essential autoconf automake ccache
+DEB_DEPENDS += debhelper dkms git libtool libapr1-dev dh-systemd
+DEB_DEPENDS += libconfuse-dev git-review exuberant-ctags cscope pkg-config
+DEB_DEPENDS += lcov chrpath autoconf indent clang-format libnuma-dev
+DEB_DEPENDS += python-all python3-all python3-setuptools python-dev
+DEB_DEPENDS += python-virtualenv python-pip libffi6 check
+DEB_DEPENDS += libboost-all-dev libffi-dev python3-ply libmbedtls-dev
+DEB_DEPENDS += cmake ninja-build uuid-dev python3-jsonschema
+ifeq ($(OS_VERSION_ID),14.04)
+	DEB_DEPENDS += libssl-dev
+else ifeq ($(OS_ID)-$(OS_VERSION_ID),debian-8)
+	DEB_DEPENDS += libssl-dev
+	APT_ARGS = -t jessie-backports
+else ifeq ($(OS_ID)-$(OS_VERSION_ID),debian-9)
+	DEB_DEPENDS += libssl1.0-dev
+else
+	DEB_DEPENDS += libssl-dev
+endif
+
+RPM_DEPENDS  = redhat-lsb glibc-static
+RPM_DEPENDS += apr-devel
+RPM_DEPENDS += numactl-devel
+RPM_DEPENDS += check check-devel
+RPM_DEPENDS += boost boost-devel
+RPM_DEPENDS += selinux-policy selinux-policy-devel
+RPM_DEPENDS += ninja-build
+RPM_DEPENDS += libuuid-devel
+RPM_DEPENDS += mbedtls-devel
+
+ifeq ($(OS_ID),fedora)
+	RPM_DEPENDS += dnf-utils
+	RPM_DEPENDS += subunit subunit-devel
+	RPM_DEPENDS += compat-openssl10-devel
+	RPM_DEPENDS += python3-devel python3-ply
+	RPM_DEPENDS += python3-virtualenv python3-jsonschema
+	RPM_DEPENDS += cmake
+	RPM_DEPENDS_GROUPS = 'C Development Tools and Libraries'
+else
+	RPM_DEPENDS += yum-utils
+	RPM_DEPENDS += openssl-devel
+	RPM_DEPENDS += python-devel python36-ply
+	RPM_DEPENDS += python3-devel python3-pip
+	RPM_DEPENDS += python-virtualenv python36-jsonschema
+	RPM_DEPENDS += devtoolset-7
+	RPM_DEPENDS += cmake3
+	RPM_DEPENDS_GROUPS = 'Development Tools'
+endif
+
+# +ganglia-devel if building the ganglia plugin
+
+RPM_DEPENDS += chrpath libffi-devel rpm-build
+
+$(BR)/.deps.ok:
+ifeq ($(findstring y,$(UNATTENDED)),y)
+	make install-dep
+endif
+ifeq ($(filter ubuntu debian,$(OS_ID)),$(OS_ID))
+	@MISSING=$$(apt-get install -y -qq -s $(DEB_DEPENDS) | grep "^Inst ") ; \
+	if [ -n "$$MISSING" ] ; then \
+	  echo "\nPlease install missing packages: \n$$MISSING\n" ; \
+	  echo "by executing \"make install-dep\"\n" ; \
+	  exit 1 ; \
+	fi ; \
+	exit 0
+else ifneq ("$(wildcard /etc/redhat-release)","")
+	@for i in $(RPM_DEPENDS) ; do \
+	    RPM=$$(basename -s .rpm "$${i##*/}" | cut -d- -f1,2,3)  ;	\
+	    MISSING+=$$(rpm -q $$RPM | grep "^package")	   ;    \
+	done							   ;	\
+	if [ -n "$$MISSING" ] ; then \
+	  echo "Please install missing RPMs: \n$$MISSING\n" ; \
+	  echo "by executing \"make install-dep\"\n" ; \
+	  exit 1 ; \
+	fi ; \
+	exit 0
+endif
+
+install-dep:
+ifeq ($(filter ubuntu debian,$(OS_ID)),$(OS_ID))
+ifeq ($(OS_VERSION_ID),14.04)
+	@sudo -E apt-get $(CONFIRM) $(FORCE) install software-properties-common
+endif
+ifeq ($(OS_ID)-$(OS_VERSION_ID),debian-8)
+	@grep -q jessie-backports /etc/apt/sources.list /etc/apt/sources.list.d/* 2> /dev/null \
+           || ( echo "Please install jessie-backports" ; exit 1 )
+endif
+ifeq ($(ARCH),native)
+	@sudo -E apt-get update
+	@sudo -E apt-get $(APT_ARGS) $(CONFIRM) $(FORCE) install $(DEB_DEPENDS)
+	$(RESTORE_LINK_TO_NATIVE_OBJCOPY_AND_STRIP)
+else ifneq ($(ARCH),$(MACHINE))
+# cross compilation pkg install
+ifeq ($(ARCH),aarch64)
+# cross compilation pkg install
+#ifeq ($(ARCH),aarch64)
+	@sudo dpkg --add-architecture arm64
+	@sudo apt-get update
+	@sudo add-apt-repository -n "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ bionic main restricted universe multiverse"
+	@sudo add-apt-repository -n "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ bionic-updates main restricted universe multiverse"
+	@sudo add-apt-repository -n "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ bionic-backports main restricted universe multiverse"
+	$(eval DEB_DEPENDS += libssl-dev:arm64 libmbedtls-dev:arm64 uuid-dev:arm64)
+	$(eval DEB_DEPENDS += libnuma-dev:arm64 libnl-3-dev:arm64)
+	$(eval DEB_DEPENDS += gcc-8-aarch64-linux-gnu g++-8-aarch64-linux-gnu)
+	@sudo -E apt-get update || true
+	@sudo -E apt-get $(APT_ARGS) $(CONFIRM) $(FORCE) install $(DEB_DEPENDS)
+	@sudo update-alternatives \
+	    --install /usr/bin/aarch64-linux-gnu-gcc aarch64-linux-gnu-gcc /usr/bin/aarch64-linux-gnu-gcc-8 800 \
+	    --slave /usr/bin/aarch64-linux-gnu-g++ aarch64-linux-gnu-g++ /usr/bin/aarch64-linux-gnu-g++-8
+	$(SET_LINK_TO_ARCH_DEPENDANT_OBJCOPY_AND_STRIP)
+#else
+define RESTORE_LINK_TO_NATIVE_OBJCOPY_AND_STRIP =
+@find /usr/bin -name objcopy -type l -exec ls -al {} \; | grep $(MACHINE); \
+retVal=$$?; \
+if [ $$retVal -ne 0 ]; then \
+  sudo rm /usr/bin/objcopy; \
+  sudo ln -s /usr/bin/$(MACHINE)-linux-gnu-objcopy /usr/bin/objcopy; \
+fi
+@find /usr/bin -name strip -type l -exec ls -al {} \; | grep $(MACHINE); \
+retVal=$$?; \
+if [ $$retVal -ne 0 ]; then \
+  sudo rm /usr/bin/strip; \
+  sudo ln -s /usr/bin/$(MACHINE)-linux-gnu-strip /usr/bin/strip; \
+fi
+endef
+
+define SET_LINK_TO_ARCH_DEPENDANT_OBJCOPY_AND_STRIP =
+@sudo rm /usr/bin/objcopy
+@sudo ln -s /usr/bin/aarch64-linux-gnu-objcopy /usr/bin/objcopy
+@sudo rm /usr/bin/strip
+@sudo ln -s /usr/bin/aarch64-linux-gnu-strip /usr/bin/strip
+endef
+
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    autoconf automake build-essential ca-certificates curl gdb git \
+    inetutils-traceroute iproute2 ipsec-tools iputils-ping \
+    libapr1 libmbedcrypto1 libmbedtls10 libmbedx509-0 libtool \
+    make mc nano netcat python software-properties-common sudo supervisor \
+    telnet unzip wget \
+ && rm -rf /var/lib/apt/lists/*
+
+# install Protobuf
+ARG PROTOC_VERSION=3.6.1
+ARG PROTOC_OS_ARCH=linux_x86_64
+RUN wget -q https://github.com/google/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-${PROTOC_OS_ARCH}.zip \
+ && unzip protoc-${PROTOC_VERSION}-${PROTOC_OS_ARCH}.zip -d protoc3 \
+ && mv protoc3/bin/protoc /usr/local/bin \
+ && mv protoc3/include/google /usr/local/include \
+ && rm -rf protoc-${PROTOC_VERSION}-${PROTOC_OS_ARCH}.zip protoc3
+
+RUN mkdir -p /opt/vpp-agent/dev /opt/vpp-agent/plugin
+
+WORKDIR /opt/vpp-agent/dev
+
+ARG VPP_REPO_URL
+ARG VPP_COMMIT
+
+ARG VPP_DEBUG_DEB
+
+RUN set -eux; \
+    git clone "${VPP_REPO_URL}" vpp; \
+    cd vpp; \
+    git checkout "${VPP_COMMIT}"; \
+    sed -i -e 's/vpp vom japi/vpp/g' build-data/platforms/vpp.mk; \
+    export UNATTENDED=y; \
+    make install-dep dpdk-install-dev; \
+    if [ -n "${VPP_DEBUG_DEB}" ]; then \
+        make vpp_configure_args_vpp='--disable-japi' build; \
+        make -C build-root PLATFORM=vpp TAG=vpp_debug install-deb; \
+    else \
+        make vpp_configure_args_vpp='--disable-japi' build-release pkg-deb; \
+    fi; \
+    cd build-root; \
+    dpkg -i vpp_*.deb vpp-dev_*.deb vpp-lib_*.deb vpp-plugins_*.deb vpp-dbg_*.deb; \
+    rm -rf .ccache /var/lib/apt/lists/*; \
+    find . -type f -name '*.o' -exec rm -rf '{}' \;
+
+COPY vpp.conf /etc/vpp/vpp.conf
+
+RUN cd $GOPATH/src/github.com/ligato/vpp-agent \
+ && VERSION=$VERSION COMMIT=$COMMIT DATE=$DATE make install
+
+WORKDIR /
+
+# run supervisor as the default executable
+CMD rm -f /dev/shm/db /dev/shm/global_vm /dev/shm/vpe-api && \
+    /usr/bin/supervisord -c /etc/supervisord/supervisord.conf
